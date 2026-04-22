@@ -1,116 +1,113 @@
-import asyncio
-import redis
-import random
-import sys
-import os
-import urllib.parse
-from urllib.parse import urljoin, urlparse
+import re
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
+from html import unescape
 
-class MultiSourceMedicalCrawler:
-    def __init__(self, seed_urls, redis_host='localhost', max_workers=60):
+INPUT_FILE = "Raw_Med_Data.txt"
+OUTPUT_FILE = "Cleaned_Med_Data.txt"
 
-        self.seed_urls = seed_urls
 
-        self.REDIS_QUEUE = "medical_queue:global"
-        self.REDIS_VISITED = "medical_visited:global"
-        self.output_file = "Raw_Med_Data.txt"
-        self.max_workers = max_workers
+def normalize_text(text):
+    text = unescape(text)
 
-        self.allowed_domains = [urlparse(u).netloc for u in seed_urls]
-        
-        try:
-            self.r = redis.Redis(
-                host=redis_host, port=6379, db=0, 
-                decode_responses=True, socket_timeout=60
-            )
-            self.r.ping()
-            print(f"--- [OK] Pripojené k Redisu. Celkový počet videných: {self.r.scard(self.REDIS_VISITED)} ---")
-        except Exception as e:
-            print(f"--- [CHYBA] Redis nedostupný: {e} ---")
-            sys.exit(1)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
 
-        self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        ]
+    lines = []
+    seen = set()
 
-    async def worker(self, browser):
-        while True:
-            url = self.r.rpop(self.REDIS_QUEUE)
-            if not url:
-                await asyncio.sleep(5)
+    for line in text.split("\n"):
+        line = line.strip()
+
+        if not line:
+            continue
+
+        if len(line) == 1:
+            continue
+
+        if line in seen:
+            continue
+
+        seen.add(line)
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def extract_main_content(html):
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup(["script", "style", "noscript", "svg"]):
+        tag.decompose()
+
+    for tag in soup.find_all(["nav", "footer", "header", "form"]):
+        tag.decompose()
+
+    main = (
+        soup.find("main")
+        or soup.find("article")
+        or soup.find("div", class_=re.compile("content|mw-parser-output|main"))
+    )
+
+    if main:
+        content = main
+    else:
+        content = soup
+
+    text = content.get_text(separator="\n", strip=True)
+
+    return normalize_text(text)
+
+
+def process_stream():
+    buffer = ""
+    count = 0
+    kept = 0
+
+    with open(INPUT_FILE, "r", encoding="utf-8") as f, \
+         open(OUTPUT_FILE, "w", encoding="utf-8") as out:
+
+        for line in f:
+            buffer += line
+
+            if "=== END ===" not in buffer:
                 continue
 
-            if self.r.sismember(self.REDIS_VISITED, url):
-                continue
+            parts = buffer.split("=== END ===")
 
-            context = await browser.new_context(user_agent=random.choice(self.user_agents))
-            page = await context.new_page()
-            
-            try:
-                await page.route("**/*.{png,jpg,jpeg,svg,mp4,mp3,woff,woff2,css}", lambda route: route.abort())
-                
-                print(f"Sťahujem: {url}")
-                await page.goto(url, timeout=45000, wait_until="domcontentloaded")
-                
-                raw_html = await page.content()
+            for part in parts[:-1]:
+                part = part.strip()
+                if not part:
+                    continue
 
-                with open(self.output_file, "a", encoding="utf-8") as f:
-                    f.write(f"\n\n=== SOURCE_START URL: {url} ===\n")
-                    f.write(raw_html)
-                    f.write(f"\n=== SOURCE_END URL: {url} ===\n")
-                
-                self.r.sadd(self.REDIS_VISITED, url)
+                header = re.search(r"=== URL: (.*?) \| TYPE: (.*?) ===", part)
+                if not header:
+                    continue
 
-                soup = BeautifulSoup(raw_html, 'html.parser')
-                for a in soup.find_all('a', href=True):
-                    full_url = urllib.parse.urljoin(url, a['href']).split('#')[0].rstrip('/')
-                    parsed_url = urlparse(full_url)
+                url = header.group(1).strip()
+                typ = header.group(2).strip()
 
-                    if parsed_url.netloc in self.allowed_domains:
-                        decoded_url = urllib.parse.unquote(full_url).lower()
-                        odpad = ['index.php', 'action=', 'diff=', 'oldid=', 'search=', 'special:', 'kategorie:', 'soubor:']
-                        
-                        if any(x in decoded_url for x in odpad):
-                            continue
+                html = re.sub(r"^.*?===\n?", "", part, flags=re.DOTALL)
 
-                        if not self.r.sismember(self.REDIS_VISITED, full_url):
-                            self.r.lpush(self.REDIS_QUEUE, full_url)
+                text = extract_main_content(html)
 
-            except Exception as e:
-                pass 
-            finally:
-                await page.close()
-                await context.close()
-            
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+                count += 1
 
-    async def run(self):
-        if self.r.llen(self.REDIS_QUEUE) == 0:
-            for s_url in self.seed_urls:
-                self.r.lpush(self.REDIS_QUEUE, s_url)
+                if not text or len(text) < 20:
+                    continue
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            await asyncio.gather(*[self.worker(browser) for _ in range(self.max_workers)])
-            await browser.close()
+                out.write("=" * 80 + "\n")
+                out.write(f"{url} | {typ}\n")
+                out.write(text + "\n\n")
+
+                kept += 1
+
+                if count % 100 == 0:
+                    print(f"Processed: {count} | Kept: {kept}")
+
+            buffer = parts[-1]
+
+    print(f"DONE: {count} | KEPT: {kept}")
+
 
 if __name__ == "__main__":
-    targets = [
-        "https://www.wikiskripta.eu",
-        "https://www.nzip.cz",            
-        "https://www.stefajir.cz",         
-        "https://www.ordinace.cz",         
-        "https://www.zdravie.sk",          
-        "https://sk.wikipedia.org/wiki/Kategória:Medicína", 
-        "https://cs.wikipedia.org/wiki/Portál:Medicína"    
-    ]
-    
-    crawler = MultiSourceMedicalCrawler(targets, max_workers=60) 
-    
-    try:
-        asyncio.run(crawler.run())
-    except KeyboardInterrupt:
-        print("\n--- Zastavené. ---")
+    process_stream()
