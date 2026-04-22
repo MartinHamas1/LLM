@@ -2,65 +2,106 @@ import re
 from bs4 import BeautifulSoup
 from html import unescape
 
-def mediawiki_cleaner_v1(raw_text):
-  cleaned_docs = []
+INPUT_FILE = "Raw_Med_Data.txt"
+OUTPUT_FILE = "Cleaned_Med_Data.txt"
 
-  docs = raw_text.split("[[[END]]]")
 
-  for doc in docs:
-    doc = doc.strip()
-    if not doc:
-        continue
+def is_garbage(text):
+    lines = text.split("\n")
 
-    url_match = re.search(r"\[\[\[URL:(.*?)\]\]\]", doc)
-    url = url_match.group(1) if url_match else None
+    short_lines = sum(1 for l in lines if len(l.strip()) < 40)
+    long_lines = sum(1 for l in lines if len(l.strip()) > 120)
 
-    doc = re.sub(r"\[\[\[URL:.*?\]\]\]", "", doc)
+    if short_lines > long_lines * 4:
+        return True
 
-    soup = BeautifulSoup(doc, "html.parser")
+    words = re.findall(r"\w+", text.lower())
+    if len(words) > 0:
+        unique_ratio = len(set(words)) / len(words)
+        if unique_ratio < 0.2:
+            return True
 
-    main = soup.select_one("div.mw-parser-output")
+    return False
 
-    if main:
-        content_root = main
-    else:
-        content_root = soup
 
-    for tag in content_root(["script", "style", "noscript"]):
+def clean_html_safe(html):
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
 
-    for tag in content_root.find_all(["table", "nav", "footer"]):
-        classes = " ".join(tag.get("class", []))
+    text = soup.get_text(separator="\n")
+    text = unescape(text)
 
-        if any(x in classes for x in ["navbar", "footer", "mw-footer", "toc", "metadata"]):
-            tag.decompose()
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
 
-        text = content_root.get_text(separator="\n", strip=True)
+    lines = []
 
-        text = unescape(text)
+    for line in text.split("\n"):
+        line = line.strip()
 
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = re.sub(r"[ \t]+", " ", text)
-        text = text.strip()
-
-        if len(text) < 80:
+        if not line:
             continue
 
-        cleaned_docs.append({
-            "url": url,
-            "text": text
-        })
+        if len(line) <= 1:
+            continue
 
-    return cleaned_docs
+        lines.append(line)
+
+    text = "\n".join(lines)
+
+    if is_garbage(text):
+        return None
+
+    return text
 
 
-with open("dataset_test.txt", "r", encoding="utf-8") as f:
-    raw = f.read()
+def process_file():
+    with open(INPUT_FILE, "r", encoding="utf-8") as f:
+        data = f.read()
 
-cleaned = mediawiki_cleaner_v1(raw)
+    # 🔥 split podľa URL (nie END)
+    chunks = re.split(r"={3,}\s*URL:", data)
 
-for c in cleaned[:3]:
-    print("\n" + "="*80)
-    print(c["url"])
-    print(c["text"][:800])
+    count = 0
+    kept = 0
 
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as out:
+
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+
+            header = re.match(r"(.*?)\s*\|\s*TYPE:\s*(.*?)\s*===\n", chunk)
+            if not header:
+                continue
+
+            url = header.group(1).strip()
+            typ = header.group(2).strip()
+
+            html = chunk[header.end():]
+
+            text = clean_html_safe(html)
+
+            count += 1
+
+            if not text:
+                continue
+
+            out.write("=" * 80 + "\n")
+            out.write(f"{url} | {typ}\n")
+            out.write(text + "\n\n")
+
+            kept += 1
+
+            if count % 100 == 0:
+                print(f"Processed: {count} | Kept: {kept}")
+
+    print(f"\nDONE: {count} docs | KEPT: {kept}")
+
+
+if __name__ == "__main__":
+    process_file()
