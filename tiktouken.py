@@ -9,7 +9,8 @@ class TikTokenizer:
 
     def decode(self, tokens):
         return self.enc.decode(tokens)
-    
+
+
 tok = TikTokenizer()
 
 texts = [
@@ -21,4 +22,20 @@ texts = [
 
 for text in texts:
     tokens = tok.encode(text)
-    print("COUNT:", len(tokens))
+    pieces = [tok.decode([t]) for t in tokens]
+
+    print("=" * 80)
+    print("TEXT:")
+    print(text)
+    print()
+
+    print("TOKENIZÁCIA:")
+    print(" | ".join(pieces))   # rozdelená veta v jednom riadku
+    print()
+
+    print("TOKEN ID:")
+    print(" | ".join(str(t) for t in tokens))
+    print()
+
+    print(f"POČET TOKENOV: {len(tokens)}")
+    print("\n")
