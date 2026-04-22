@@ -1,6 +1,6 @@
 from tokenizers import Tokenizer
 
-tokenizer = Tokenizer.from_file("Medical_Tokenizer.json")
+tokenizer = Tokenizer.from_file("tokenizer.json")
 
 texts = [
     "Pacient trpí akútnou pankreatitídou a vyžaduje hospitalizáciu.",
@@ -10,6 +10,23 @@ texts = [
 ]
 
 for text in texts:
-    tokens = tokenizer.encode(text)
-    print("COUNT:", len(tokens))
+    encoding = tokenizer.encode(text)
 
+    pieces = encoding.tokens
+    ids = encoding.ids
+
+    print("=" * 80)
+    print("TEXT:")
+    print(text)
+    print()
+
+    print("TOKENIZÁCIA:")
+    print(" | ".join(pieces))
+    print()
+
+    print("TOKEN ID:")
+    print(" | ".join(str(i) for i in ids))
+    print()
+
+    print(f"POČET TOKENOV: {len(ids)}")
+    print("\n")
